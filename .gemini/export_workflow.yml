@@ -1,0 +1,145 @@
+name: ChatStash Daily Export
+description: Automated ChatGPT conversation export and synchronization
+version: 1.0
+
+steps:
+  - name: environment_check
+    description: Verify runtime environment and dependencies
+    command: python
+    args:
+      - scripts/env_check.py
+    timeout: 30s
+    on_failure: exit
+    
+  - name: load_configuration
+    description: Load and validate ChatStash configuration
+    command: python
+    args:
+      - -c
+      - "from src.config import Config; Config.validate()"
+    timeout: 10s
+    on_failure: exit
+    
+  - name: initialize_browser
+    description: Launch Playwright browser with ChatGPT session
+    command: python
+    args:
+      - src/exporters/browser_manager.py
+      - --mode
+      - initialize
+    timeout: 60s
+    retry_count: 3
+    retry_delay: 10s
+    
+  - name: authenticate_chatgpt
+    description: Authenticate with ChatGPT using stored credentials
+    command: python
+    args:
+      - src/exporters/chatgpt_auth.py
+      - --auto-login
+    timeout: 120s
+    retry_count: 2
+    on_failure: cleanup_and_exit
+    
+  - name: export_conversations
+    description: Extract conversations from the last 24 hours
+    command: python
+    args:
+      - src/exporters/conversation_extractor.py
+      - --days
+      - "1"
+      - --format
+      - json
+      - --output
+      - data/exports/daily
+    timeout: 1800s  # 30 minutes for large conversation sets
+    
+  - name: process_conversations
+    description: Deduplicate and process extracted conversations
+    command: python
+    args:
+      - src/sync/conversation_processor.py
+      - --input
+      - data/exports/daily
+      - --deduplicate
+    timeout: 300s
+    
+  - name: update_database
+    description: Update local conversation database
+    command: python
+    args:
+      - src/database/db_manager.py
+      - --import
+      - data/exports/daily/processed
+    timeout: 180s
+    
+  - name: cloud_sync
+    description: Synchronize processed data to cloud storage
+    command: python
+    args:
+      - src/sync/cloud_sync.py
+      - --upload
+      - data/exports/daily/processed
+    timeout: 600s
+    retry_count: 3
+    retry_delay: 30s
+    
+  - name: generate_report
+    description: Generate daily export report
+    command: python
+    args:
+      - scripts/generate_report.py
+      - --date
+      - "today"
+      - --output
+      - reports/daily
+    timeout: 60s
+    
+  - name: cleanup
+    description: Clean up temporary files and browser sessions
+    command: python
+    args:
+      - scripts/cleanup.py
+      - --temp-files
+      - --browser-sessions
+    timeout: 30s
+    always_run: true
+
+error_handling:
+  on_step_failure:
+    - log_error
+    - send_notification
+    - cleanup_resources
+    
+  on_workflow_failure:
+    - generate_failure_report
+    - send_alert_email
+    - preserve_debug_data
+
+notifications:
+  email:
+    enabled: true
+    smtp_server: "${SMTP_SERVER}"
+    from: "chatstash@${DOMAIN}"
+    to: "${USER_EMAIL}"
+    
+  success_subject: "ChatStash: Daily export completed successfully"
+  failure_subject: "ChatStash: Daily export failed - Action required"
+
+logging:
+  level: INFO
+  file: logs/gemini_workflow.log
+  rotation: daily
+  retention: 30d
+  
+environment:
+  required_vars:
+    - CHATSTASH_CONFIG_PATH
+    - CHATSTASH_DATA_PATH
+    - OPENAI_SESSION_TOKEN
+    - CLOUD_STORAGE_TOKEN
+  
+  optional_vars:
+    - SMTP_SERVER
+    - USER_EMAIL
+    - DEBUG_MODE
